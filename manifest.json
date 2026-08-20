@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "DeepSeek 单词翻译",
+  "version": "1.0.0",
+  "description": "双击英文单词，显示音标与中文释义（由 DeepSeek 驱动）",
+  "permissions": ["storage"],
+  "host_permissions": ["https://api.deepseek.com/*"],
+  "background": { "service_worker": "background.js" },
+  "action": {
+    "default_title": "DeepSeek 单词翻译",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["lib/word.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
