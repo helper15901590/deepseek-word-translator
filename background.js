@@ -68,10 +68,11 @@ async function requestJson(messages) {
 const lookup = Lookup.createLookup({
   getApiKey: getApiKey,
   requestJson: requestJson,
+  makeKey: Lookup.makeContextKey,
   cache: {
-    get: (word) => cache.get(word),
-    set: (word, data) => {
-      cache.set(word, data);
+    get: (key) => cache.get(key),
+    set: (key, data) => {
+      cache.set(key, data);
       persistCache();
     },
   },
@@ -85,7 +86,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return;
     }
     const word = WordUtils.normalizeWord(message.word);
-    sendResponse(await lookup(word));
+    let context = null;
+    if (typeof message.context === "string" && message.context.trim() !== "") {
+      context = message.context.trim().slice(0, 400);
+    }
+    sendResponse(await lookup(word, context));
   })();
   return true; // 异步 sendResponse
 });

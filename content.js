@@ -1,10 +1,15 @@
-// Content script：双击取词 + Shadow DOM 弹窗
+// Content script：双击取词 + Shadow DOM 弹窗（弹窗跟随单词滚动）
 (function () {
   if (window.__dswtInjected) return;
   window.__dswtInjected = true;
 
   const POPUP_ID = "dswt-popup-host";
   const WORD_CHAR_RE = /[A-Za-z'-]/;
+  const CONTEXT_WINDOW = 180;
+  const BLOCK_TAGS = new Set([
+    "P", "LI", "TD", "TH", "H1", "H2", "H3", "H4", "H5", "H6",
+    "BLOCKQUOTE", "PRE", "DIV", "ARTICLE", "SECTION", "DD", "DT", "FIGCAPTION",
+  ]);
   const ERRORS = {
     NO_KEY: "请点击浏览器工具栏插件图标，填入 DeepSeek API Key",
     AUTH: "API Key 无效或已过期，请在插件面板中更新",
@@ -18,23 +23,28 @@
     "box-shadow:0 4px 16px rgba(0,0,0,.35);max-width:320px;" +
     "border:1px solid rgba(255,255,255,.08)}" +
     ".word{font-weight:700;font-size:15px}" +
-    ".phonetic{color:#9aa0ab;font-style:italic;margin:2px 0 6px}" +
+    ".phonetic{color:#9aa0ab;margin:2px 0 6px}" +
     ".def{margin:2px 0}.pos{color:#7ecbff;margin-right:6px}" +
+    ".context{margin-top:6px;padding-top:6px;border-top:1px dashed rgba(128,128,128,.35)}" +
+    ".context-label{color:#c792ea;margin-right:6px}" +
     ".muted{color:#9aa0ab}.error{color:#ffb3ab}" +
     "@media (prefers-color-scheme: light){" +
     ".card{background:#fff;color:#1f2328;border-color:rgba(0,0,0,.08);" +
     "box-shadow:0 4px 16px rgba(0,0,0,.18)}" +
-    ".phonetic,.muted{color:#6a737d}.pos{color:#0969da}.error{color:#d1242f}}";
+    ".phonetic,.muted{color:#6a737d}.pos{color:#0969da}.error{color:#d1242f}" +
+    ".context-label{color:#8250df}}";
 
   let host = null;
+  let anchorRange = null;
 
   function hidePopup() {
     if (!host) return;
     host.remove();
     host = null;
+    anchorRange = null;
     document.removeEventListener("keydown", onKeydown, true);
     document.removeEventListener("mousedown", onMousedown, true);
-    window.removeEventListener("scroll", hidePopup, true);
+    window.removeEventListener("scroll", onScroll, true);
     window.removeEventListener("resize", hidePopup);
   }
 
@@ -46,52 +56,78 @@
     if (host && !e.composedPath().includes(host)) hidePopup();
   }
 
+  // 滚动时让弹窗跟随锚点单词；单词滚出视口则隐藏
+  function onScroll() {
+    if (!host || !anchorRange) return;
+    const r = anchorRange.getBoundingClientRect();
+    if (r.bottom < 0 || r.top > window.innerHeight) {
+      hidePopup();
+      return;
+    }
+    positionPopup();
+  }
+
+  // 返回 { word, range } 或 null
   function extractWord(e) {
     const sel = window.getSelection();
     const selText = sel ? sel.toString().trim() : "";
-    if (selText && WordUtils.isValidWord(selText)) {
-      return WordUtils.normalizeWord(selText);
+    if (selText && WordUtils.isValidWord(selText) && sel.rangeCount > 0) {
+      return {
+        word: WordUtils.normalizeWord(selText),
+        range: sel.getRangeAt(0).cloneRange(),
+      };
     }
     if (document.caretRangeFromPoint) {
-      const range = document.caretRangeFromPoint(e.clientX, e.clientY);
-      if (range && range.startContainer.nodeType === Node.TEXT_NODE) {
-        const text = range.startContainer.data;
-        let start = range.startOffset;
-        let end = range.endOffset;
+      const caret = document.caretRangeFromPoint(e.clientX, e.clientY);
+      if (caret && caret.startContainer.nodeType === Node.TEXT_NODE) {
+        const text = caret.startContainer.data;
+        let start = caret.startOffset;
+        let end = caret.endOffset;
         while (start > 0 && WORD_CHAR_RE.test(text[start - 1])) start--;
         while (end < text.length && WORD_CHAR_RE.test(text[end])) end++;
         const w = text.slice(start, end).trim();
-        if (WordUtils.isValidWord(w)) return WordUtils.normalizeWord(w);
+        if (WordUtils.isValidWord(w)) {
+          const range = document.createRange();
+          range.setStart(caret.startContainer, start);
+          range.setEnd(caret.startContainer, end);
+          return { word: WordUtils.normalizeWord(w), range: range };
+        }
       }
     }
     return null;
   }
 
-  function getRect(e) {
-    const sel = window.getSelection();
-    if (sel && sel.rangeCount > 0 && !sel.isCollapsed) {
-      const r = sel.getRangeAt(0).getBoundingClientRect();
-      if (r && (r.width || r.height)) return r;
-    }
-    if (document.caretRangeFromPoint) {
-      const range = document.caretRangeFromPoint(e.clientX, e.clientY);
-      if (range) {
-        const r = range.getBoundingClientRect();
-        if (r && (r.width || r.height)) return r;
+  // 提取单词所在文本块、前后各约 CONTEXT_WINDOW 字符的语境；失败返回 null
+  function extractContext(range) {
+    try {
+      let el =
+        range.startContainer.nodeType === Node.TEXT_NODE
+          ? range.startContainer.parentElement
+          : range.startContainer;
+      while (el && el !== document.body && !BLOCK_TAGS.has(el.tagName)) {
+        el = el.parentElement;
       }
+      const block = el || document.body;
+      const fullText = block.textContent.replace(/\s+/g, " ").trim();
+      if (fullText.length === 0) return null;
+      const pre = document.createRange();
+      pre.selectNodeContents(block);
+      pre.setEnd(range.startContainer, range.startOffset);
+      const before = pre.toString().replace(/\s+/g, " ").length;
+      const wordLen = Math.max(1, range.toString().length);
+      const start = Math.max(0, before - CONTEXT_WINDOW);
+      const end = Math.min(fullText.length, before + wordLen + CONTEXT_WINDOW);
+      const ctx = fullText.slice(start, end).trim();
+      return ctx.length >= 2 ? ctx : null;
+    } catch (e) {
+      return null;
     }
-    return {
-      left: e.clientX,
-      top: e.clientY,
-      right: e.clientX,
-      bottom: e.clientY,
-      width: 0,
-      height: 0,
-    };
   }
 
-  function positionPopup(rect) {
-    if (!host) return;
+  // 依据锚点单词当前位置摆放弹窗（视口边界自动翻转）
+  function positionPopup() {
+    if (!host || !anchorRange) return;
+    const rect = anchorRange.getBoundingClientRect();
     const card = host.shadowRoot.querySelector(".card");
     const cw = card.offsetWidth;
     const ch = card.offsetHeight;
@@ -107,7 +143,7 @@
     host.style.top = top + "px";
   }
 
-  function showPopup(rect, word) {
+  function showPopup(word, range) {
     hidePopup();
     host = document.createElement("div");
     host.id = POPUP_ID;
@@ -128,14 +164,15 @@
     card.append(wordEl, loadingEl);
     shadow.append(style, card);
     document.documentElement.appendChild(host);
-    positionPopup(rect);
+    anchorRange = range.cloneRange();
+    positionPopup();
     document.addEventListener("keydown", onKeydown, true);
     document.addEventListener("mousedown", onMousedown, true);
-    window.addEventListener("scroll", hidePopup, true);
+    window.addEventListener("scroll", onScroll, true);
     window.addEventListener("resize", hidePopup);
   }
 
-  function renderResult(rect, word, result) {
+  function renderResult(word, result) {
     if (!host) return;
     const card = host.shadowRoot.querySelector(".card");
     card.textContent = "";
@@ -159,6 +196,17 @@
         defEl.append(posEl, meaningEl);
         card.appendChild(defEl);
       }
+      if (result.data.contextMeaning) {
+        const ctxEl = document.createElement("div");
+        ctxEl.className = "context";
+        const labelEl = document.createElement("span");
+        labelEl.className = "context-label";
+        labelEl.textContent = "语境义";
+        const meaningEl = document.createElement("span");
+        meaningEl.textContent = result.data.contextMeaning;
+        ctxEl.append(labelEl, meaningEl);
+        card.appendChild(ctxEl);
+      }
     } else {
       const errEl = document.createElement("div");
       errEl.className = "error";
@@ -168,20 +216,20 @@
         (code === "HTTP" ? "请求失败（HTTP " + result.status + "）" : "查询失败，请重试");
       card.appendChild(errEl);
     }
-    positionPopup(rect);
+    positionPopup();
   }
 
   document.addEventListener("dblclick", (e) => {
     if (e.target && e.target.closest && e.target.closest("#" + POPUP_ID)) return;
-    const word = extractWord(e);
-    if (!word) return;
-    const rect = getRect(e);
-    showPopup(rect, word);
+    const found = extractWord(e);
+    if (!found) return;
+    const context = extractContext(found.range);
+    showPopup(found.word, found.range);
     chrome.runtime
-      .sendMessage({ type: "lookup", word: word })
+      .sendMessage({ type: "lookup", word: found.word, context: context })
       .then((result) => {
         if (chrome.runtime.lastError || !result) return;
-        renderResult(rect, word, result);
+        renderResult(found.word, result);
       })
       .catch(() => {});
   });
