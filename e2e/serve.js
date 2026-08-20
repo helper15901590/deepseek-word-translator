@@ -5,7 +5,7 @@ const root = path.join(__dirname, "..");
 http
   .createServer((req, res) => {
     const name = req.url === "/" ? "test-page.html" : req.url.split("?")[0];
-    const file = path.join(root, "test", name);
+    const file = path.join(root, "e2e", name);
     fs.readFile(file, (err, data) => {
       if (err) { res.writeHead(404); res.end("not found"); return; }
       res.writeHead(200, {
