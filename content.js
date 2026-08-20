@@ -56,8 +56,10 @@
     if (host && !e.composedPath().includes(host)) hidePopup();
   }
 
-  // 滚动时让弹窗跟随锚点单词；单词滚出视口则隐藏
-  function onScroll() {
+  // 滚动时让弹窗跟随锚点单词；单词滚出视口则隐藏。
+  // scroll 事件可能携带来不及结算的中间位置，故在双 rAF 后用最终位置复查一次。
+  let settleCheck = false;
+  function checkAnchorPosition() {
     if (!host || !anchorRange) return;
     const r = anchorRange.getBoundingClientRect();
     if (r.bottom < 0 || r.top > window.innerHeight) {
@@ -66,7 +68,17 @@
     }
     positionPopup();
   }
-
+  function onScroll() {
+    checkAnchorPosition();
+    if (settleCheck) return;
+    settleCheck = true;
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        settleCheck = false;
+        checkAnchorPosition();
+      })
+    );
+  }
   // 返回 { word, range } 或 null
   function extractWord(e) {
     const sel = window.getSelection();
@@ -148,7 +160,7 @@
     host = document.createElement("div");
     host.id = POPUP_ID;
     host.style.cssText =
-      "position:absolute;z-index:2147483647;left:0;top:0;margin:0;padding:0;" +
+      "position:fixed;z-index:2147483647;left:0;top:0;margin:0;padding:0;" +
       "border:0;background:transparent;";
     const shadow = host.attachShadow({ mode: "open" });
     const style = document.createElement("style");
