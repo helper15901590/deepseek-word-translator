@@ -10,7 +10,7 @@ const {
 const GOOD =
   '{"phonetic":"/test/","definitions":[{"pos":"n.","meaning":"测试"},{"pos":"v.","meaning":"检验"}]}';
 const GOOD_CTX =
-  '{"phonetic":"/test/","definitions":[{"pos":"n.","meaning":"测试"}],"contextMeaning":"此处指软件测试"}';
+  '{"phonetic":"/test/","definitions":[{"pos":"n.","meaning":"测试"}],"contextMeaning":"此处指软件测试","memoryTip":"拆解 test 联想“测试”"}';
 const CTX = "We ran a test on the new server.";
 
 test("buildMessages 无语境：两条消息且不含语境说明", () => {
@@ -19,6 +19,7 @@ test("buildMessages 无语境：两条消息且不含语境说明", () => {
   assert.equal(msgs[0].role, "system");
   assert.equal(msgs[1].role, "user");
   assert.ok(msgs[1].content.includes("serendipity"));
+  assert.ok(msgs[1].content.includes("memoryTip"));
   assert.ok(!msgs[1].content.includes("语境"));
 });
 
@@ -27,6 +28,7 @@ test("buildMessages 有语境：user 消息包含语境文本与 contextMeaning 
   assert.equal(msgs.length, 2);
   assert.ok(msgs[1].content.includes(CTX));
   assert.ok(msgs[1].content.includes("contextMeaning"));
+  assert.ok(msgs[1].content.includes("memoryTip"));
   // 空白语境视为无语境
   const msgs2 = buildMessages("test", "   ");
   assert.ok(!msgs2[1].content.includes("contextMeaning"));
@@ -38,6 +40,7 @@ test("解析干净 JSON（无 contextMeaning → null）", () => {
   assert.equal(r.data.word, "test");
   assert.equal(r.data.phonetic, "/test/");
   assert.equal(r.data.contextMeaning, null);
+  assert.equal(r.data.memoryTip, null);
   assert.deepEqual(r.data.definitions, [
     { pos: "n.", meaning: "测试" },
     { pos: "v.", meaning: "检验" },
@@ -48,6 +51,7 @@ test("解析含 contextMeaning 的 JSON", () => {
   const r = parseLookupResponse(GOOD_CTX, "test");
   assert.equal(r.ok, true);
   assert.equal(r.data.contextMeaning, "此处指软件测试");
+  assert.equal(r.data.memoryTip, "拆解 test 联想“测试”");
 });
 
 test("contextMeaning 为空字符串/缺失时置 null", () => {
@@ -63,6 +67,21 @@ test("contextMeaning 为空字符串/缺失时置 null", () => {
   );
   assert.equal(r2.ok, true);
   assert.equal(r2.data.contextMeaning, null);
+});
+
+test("memoryTip 为空字符串/缺失/非字符串时置 null", () => {
+  const r1 = parseLookupResponse(
+    '{"phonetic":"/t/","definitions":[{"pos":"n.","meaning":"一"}],"memoryTip":""}',
+    "t"
+  );
+  assert.equal(r1.ok, true);
+  assert.equal(r1.data.memoryTip, null);
+  const r2 = parseLookupResponse(
+    '{"phonetic":"/t/","definitions":[{"pos":"n.","meaning":"一"}],"memoryTip":42}',
+    "t"
+  );
+  assert.equal(r2.ok, true);
+  assert.equal(r2.data.memoryTip, null);
 });
 
 test("解析带 markdown 代码围栏的 JSON", () => {
@@ -188,6 +207,7 @@ test("createLookup：成功结果写入缓存并返回（含语境义）", async
   const r = await lookup("test", CTX);
   assert.equal(r.ok, true);
   assert.equal(r.data.contextMeaning, "此处指软件测试");
+  assert.equal(r.data.memoryTip, "拆解 test 联想“测试”");
   assert.equal(storedKey, makeContextKey("test", CTX));
   assert.deepEqual(storedData, r.data);
   assert.ok(sentMessages[1].content.includes(CTX));
