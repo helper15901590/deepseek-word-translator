@@ -230,6 +230,17 @@
         memEl.append(labelEl, tipEl);
         card.appendChild(memEl);
       }
+      if (result.data.plainEnglish) {
+        const enEl = document.createElement("div");
+        enEl.className = "context";
+        const labelEl = document.createElement("span");
+        labelEl.className = "context-label";
+        labelEl.textContent = "英文释义";
+        const textEl = document.createElement("span");
+        textEl.textContent = result.data.plainEnglish;
+        enEl.append(labelEl, textEl);
+        card.appendChild(enEl);
+      }
     } else {
       const errEl = document.createElement("div");
       errEl.className = "error";
