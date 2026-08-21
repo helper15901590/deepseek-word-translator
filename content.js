@@ -219,6 +219,17 @@
         ctxEl.append(labelEl, meaningEl);
         card.appendChild(ctxEl);
       }
+      if (result.data.memoryTip) {
+        const memEl = document.createElement("div");
+        memEl.className = "context";
+        const labelEl = document.createElement("span");
+        labelEl.className = "context-label";
+        labelEl.textContent = "记忆";
+        const tipEl = document.createElement("span");
+        tipEl.textContent = result.data.memoryTip;
+        memEl.append(labelEl, tipEl);
+        card.appendChild(memEl);
+      }
     } else {
       const errEl = document.createElement("div");
       errEl.className = "error";
