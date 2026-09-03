@@ -9,7 +9,7 @@
 | 决策点 | 结论 |
 |---|---|
 | 翻译方向 | 仅英译中 |
-| 触发方式 | 双击单词（dblclick）；拖动选择不触发 |
+| 触发方式 | 鼠标悬停单词停留 500ms 触发；双击、拖选均不触发 |
 | API Key 配置 | 点工具栏图标，在 popup 面板输入并保存 |
 | 释义详细度 | 简洁模式：音标 + 1~3 条常用中文释义（含词性），无例句 |
 | API | DeepSeek 官方 Chat Completions，模型 `deepseek-chat` |
@@ -34,7 +34,7 @@
 
 - `manifest.json`：MV3；权限最小化——`storage`，`host_permissions` 仅 `https://api.deepseek.com/*`；content script 匹配 `http://*/*` 与 `https://*/*`（`chrome://`、扩展商店等页面由 Chrome 自动排除）。
 - `popup.html` / `popup.js`：输入 API Key，保存到 `chrome.storage.local`；显示保存状态。
-- `content.js`：监听 `dblclick` → 取词校验 → 发消息给后台 → 渲染/关闭弹窗。
+- `content.js`：监听 `mousemove`（500ms 停留去抖）→ 取词校验 → 发消息给后台 → 渲染/关闭弹窗。
 - `background.js`：接收取词请求；查缓存；调用 DeepSeek；解析结果；维护缓存。
 
 ### 单元边界
@@ -48,15 +48,14 @@
 任何单元可在不了解其他单元内部实现的情况下被替换。
 
 ## 3. 数据流
-
-1. 用户双击页面上的英文单词。
-2. content script 用 `document.caretRangeFromPoint`（或 `selection`）取词，正则 `^[A-Za-z][A-Za-z'-]*$` 校验；非单词或超长（>50 字符）则忽略。
+1. 用户将鼠标悬停在英文单词上，停留 500ms。
+2. content script 在停留计时触发后用 `document.caretRangeFromPoint` 在指针处取词（悬停场景忽略页面选区），正则 `^[A-Za-z][A-Za-z'-]*$` 校验；非单词或超长（>50 字符）则忽略。
 3. `sendMessage({type:'lookup', word})` → background。
 4. background 先查缓存（内存 Map，上限 500 条 LRU；同时持久化到 `chrome.storage.local`，插件重启后仍有效）。
 5. 未命中 → 调 `POST https://api.deepseek.com/chat/completions`，`Authorization: Bearer <key>`。
 6. 解析响应 → `{ok:true, data:{word, phonetic, definitions:[{pos, meaning}]}}` → content。
-7. content 在单词位置旁渲染弹窗（`position: absolute`，按视口边界自动翻转）。
-8. Esc / 点击弹窗外部 / 开始新的双击 → 关闭旧弹窗。
+7. content 在单词位置旁渲染弹窗（按视口边界自动翻转）。
+8. Esc / 点击弹窗外部 / 指针移出活跃区域（见 §5）/ 滚动离开单词 / 悬停新词 → 关闭或替换旧弹窗。
 
 ## 4. 提示词设计
 
@@ -71,6 +70,7 @@
 - 暗色简洁样式，圆角，阴影；随页面明暗主题（`prefers-color-scheme`）切换配色。
 - 渲染用 `textContent`/`innerText`，绝不 `innerHTML`，防 XSS。
 - 单实例：同一时刻最多一个弹窗。
+- 悬停触发下的关闭语义：指针移出「锚点单词矩形外扩 8px ∪ 弹窗矩形外扩 8px」活跃区域即关闭；滚动时经双 rAF 复查后指针已离开单词即关闭；同一单词持续停留不重复查询。
 
 ## 6. 错误处理
 
@@ -86,7 +86,7 @@
 ## 7. 缓存策略
 
 - 内存 Map + `chrome.storage.local` 持久化，容量 500 条，LRU 淘汰。
-- 重复双击同一单词不产生 API 费用。
+- 重复悬停同一单词不产生 API 费用。
 
 ## 8. 安全
 
@@ -98,9 +98,9 @@
 
 1. 安装依赖：无（零外部依赖，纯原生 JS）。
 2. `chrome://extensions` 开发者模式加载 `deepseek-word-translator/`（已解压）。
-3. 用自动化浏览器驱动 Chrome 加载该扩展：打开含英文段落的测试页，双击单词，截图验证音标与释义正确显示。
+3. 用自动化浏览器驱动 Chrome 加载该扩展：打开含英文段落的测试页，悬停单词 500ms，截图验证音标与释义正确显示。
 4. 错误路径：未配 Key、错误 Key、断网（拦截请求）各验证一次提示文案。
-5. 缓存验证：同一单词二次双击不再发出网络请求。
+5. 缓存验证：同一单词二次悬停不再发出网络请求。
 
 ## 10. 明确不做（YAGNI）
 
@@ -116,3 +116,4 @@
 4. 数据形状变更：`data` 增加 `contextMeaning: string|null`（向后兼容旧缓存条目）；消息协议增加可选 `context` 字段。
 5. **快速记忆行**：提示词 JSON 增加可选字段 `memoryTip`（一句话快速记忆该单词的方法，中文，如词根拆解/谐音/场景联想）；解析规则与 `contextMeaning` 一致（缺失/空白/非字符串 → `null`）；弹窗在「语境义」行下方（无语境时在释义列表下方）新增「记忆」行，字段为 `null` 时不渲染该行；缓存键不变，旧缓存条目无该字段即隐藏此行，无需迁移。
 6. **英文释义行**：提示词 JSON 增加可选字段 `plainEnglish`（一句简单易懂的英文解释该单词的意思，适合英语学习者）；解析规则与 `contextMeaning`/`memoryTip` 一致（缺失/空白/非字符串 → `null`）；弹窗在「记忆」行下方新增「英文释义」行，字段为 `null` 时不渲染该行；缓存键不变，旧缓存条目无该字段即隐藏此行，无需迁移。
+7. **触发方式改为悬停**（2026-09-03）：双击触发改为鼠标悬停停留 500ms（`HOVER_DELAY_MS = 500`，mousemove 去抖）。取词只走 `caretRangeFromPoint` 分支（忽略页面残留选区）。关闭语义改为自动关闭——指针离开「单词矩形外扩 8px ∪ 弹窗矩形外扩 8px」活跃区域即关，滚动双 rAF 复查后指针离开单词即关；同一单词停留不重复查询。删除 dblclick 监听器。Esc / 点击外部 / resize / 单词滚出视口的关闭逻辑保留。
