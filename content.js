@@ -1,4 +1,4 @@
-// Content script：双击取词 + Shadow DOM 弹窗（弹窗跟随单词滚动）
+// Content script：悬停取词 + Shadow DOM 弹窗（离开单词自动关闭）
 (function () {
   if (window.__dswtInjected) return;
   window.__dswtInjected = true;
@@ -6,6 +6,8 @@
   const POPUP_ID = "dswt-popup-host";
   const WORD_CHAR_RE = /[A-Za-z'-]/;
   const CONTEXT_WINDOW = 180;
+  const HOVER_DELAY_MS = 500;
+  const ACTIVE_MARGIN_PX = 8;
   const BLOCK_TAGS = new Set([
     "P", "LI", "TD", "TH", "H1", "H2", "H3", "H4", "H5", "H6",
     "BLOCKQUOTE", "PRE", "DIV", "ARTICLE", "SECTION", "DD", "DT", "FIGCAPTION",
@@ -36,12 +38,18 @@
 
   let host = null;
   let anchorRange = null;
+  let hoverTimer = null;
+  let pointerPos = { x: -1, y: -1 };
+  let activeWord = null;
 
   function hidePopup() {
     if (!host) return;
+    clearTimeout(hoverTimer);
+    hoverTimer = null;
     host.remove();
     host = null;
     anchorRange = null;
+    activeWord = null;
     document.removeEventListener("keydown", onKeydown, true);
     document.removeEventListener("mousedown", onMousedown, true);
     window.removeEventListener("scroll", onScroll, true);
@@ -56,13 +64,36 @@
     if (host && !e.composedPath().includes(host)) hidePopup();
   }
 
-  // 滚动时让弹窗跟随锚点单词；单词滚出视口则隐藏。
+  function isPointInRect(x, y, rect, margin) {
+    return (
+      x >= rect.left - margin &&
+      x <= rect.right + margin &&
+      y >= rect.top - margin &&
+      y <= rect.bottom + margin
+    );
+  }
+
+  // 指针是否位于「单词矩形外扩 ∪ 弹窗矩形外扩」活跃区域内
+  function isInActiveRegion(x, y) {
+    if (!host || !anchorRange) return false;
+    return (
+      isPointInRect(x, y, anchorRange.getBoundingClientRect(), ACTIVE_MARGIN_PX) ||
+      isPointInRect(x, y, host.getBoundingClientRect(), ACTIVE_MARGIN_PX)
+    );
+  }
+
+  // 滚动时让弹窗跟随锚点单词；单词滚出视口或离开指针则隐藏。
   // scroll 事件可能携带来不及结算的中间位置，故在双 rAF 后用最终位置复查一次。
   let settleCheck = false;
   function checkAnchorPosition() {
     if (!host || !anchorRange) return;
     const r = anchorRange.getBoundingClientRect();
     if (r.bottom < 0 || r.top > window.innerHeight) {
+      hidePopup();
+      return;
+    }
+    // 滚动时指针不动、单词随页面移动：指针离开单词即关闭
+    if (!isPointInRect(pointerPos.x, pointerPos.y, r, ACTIVE_MARGIN_PX)) {
       hidePopup();
       return;
     }
@@ -76,21 +107,16 @@
       requestAnimationFrame(() => {
         settleCheck = false;
         checkAnchorPosition();
+        // 滚动后指针可能正停在新词上：重新计时
+        armHoverTimer();
       })
     );
   }
-  // 返回 { word, range } 或 null
-  function extractWord(e) {
-    const sel = window.getSelection();
-    const selText = sel ? sel.toString().trim() : "";
-    if (selText && WordUtils.isValidWord(selText) && sel.rangeCount > 0) {
-      return {
-        word: WordUtils.normalizeWord(selText),
-        range: sel.getRangeAt(0).cloneRange(),
-      };
-    }
+
+  // 在指针 (x, y) 处取词；返回 { word, range } 或 null
+  function extractWord(x, y) {
     if (document.caretRangeFromPoint) {
-      const caret = document.caretRangeFromPoint(e.clientX, e.clientY);
+      const caret = document.caretRangeFromPoint(x, y);
       if (caret && caret.startContainer.nodeType === Node.TEXT_NODE) {
         const text = caret.startContainer.data;
         let start = caret.startOffset;
@@ -157,6 +183,7 @@
 
   function showPopup(word, range) {
     hidePopup();
+    activeWord = word;
     host = document.createElement("div");
     host.id = POPUP_ID;
     host.style.cssText =
@@ -253,10 +280,12 @@
     positionPopup();
   }
 
-  document.addEventListener("dblclick", (e) => {
-    if (e.target && e.target.closest && e.target.closest("#" + POPUP_ID)) return;
-    const found = extractWord(e);
+  // 停留计时触发：指针位于弹窗上则跳过；同一单词不重复查询
+  function onHoverDwell() {
+    if (host && isPointInRect(pointerPos.x, pointerPos.y, host.getBoundingClientRect(), 0)) return;
+    const found = extractWord(pointerPos.x, pointerPos.y);
     if (!found) return;
+    if (host && activeWord === found.word) return;
     const context = extractContext(found.range);
     showPopup(found.word, found.range);
     chrome.runtime
@@ -266,5 +295,22 @@
         renderResult(found.word, result);
       })
       .catch(() => {});
-  });
+  }
+
+  // 每次移动重置停留计时；离开活跃区域则关闭弹窗
+  function armHoverTimer() {
+    clearTimeout(hoverTimer);
+    hoverTimer = setTimeout(() => {
+      hoverTimer = null;
+      onHoverDwell();
+    }, HOVER_DELAY_MS);
+  }
+
+  function onMouseMove(e) {
+    pointerPos = { x: e.clientX, y: e.clientY };
+    if (host && !isInActiveRegion(e.clientX, e.clientY)) hidePopup();
+    armHoverTimer();
+  }
+
+  document.addEventListener("mousemove", onMouseMove, true);
 })();
