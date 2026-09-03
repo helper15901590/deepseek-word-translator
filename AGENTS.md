@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Chrome Manifest V3 extension **DeepSeek 单词翻译** (`manifest.json`): double-click an English word on any page and a Shadow-DOM popup shows its phonetics and Chinese definitions, generated via the DeepSeek `deepseek-chat` API. The API key is managed in the extension popup. Zero-dependency, no build step.
+Chrome Manifest V3 extension **DeepSeek 单词翻译** (`manifest.json`): hover over an English word on any page for 500ms and a Shadow-DOM popup shows its phonetics and Chinese definitions, generated via the DeepSeek `deepseek-chat` API. The API key is managed in the extension popup. Zero-dependency, no build step.
 
 ## Architecture & Data Flow
 
@@ -19,9 +19,9 @@ graph LR
 ```
 
 Lookup flow:
-1. `dblclick` → `content.js` extracts the word (selection, fallback `caretRangeFromPoint`) and ±180 chars of context, shows a "查询中…" Shadow-DOM card pinned to the word.
+1. `mousemove` dwell (500ms) → `content.js` extracts the word via `caretRangeFromPoint` at the pointer and ±180 chars of context, shows a "查询中…" Shadow-DOM card pinned to the word.
 2. `chrome.runtime.sendMessage({type:'lookup', word, context})` → `background.js` validates via `WordUtils`, truncates context to 400 chars, serves the LRU cache on hit, else POSTs `https://api.deepseek.com/chat/completions` (`deepseek-chat`, temperature 0.3, max_tokens 200, 15s AbortController timeout).
-3. Reply text is JSON-parsed; result is cached and persisted to `chrome.storage.local`; the popup renders it and follows the anchor word while scrolling.
+3. Reply text is JSON-parsed; result is cached and persisted to `chrome.storage.local`; the popup renders it and closes when the pointer leaves the word/popup active region, on scroll, or via Esc/click.
 
 Errors are codes, not exceptions: `NO_KEY`, `AUTH` (401), `SERVER` (429/≥500), `HTTP` (other), `NETWORK` (fetch throw), `PARSE`, `INVALID`.
 
@@ -31,7 +31,7 @@ Errors are codes, not exceptions: `NO_KEY`, `AUTH` (401), `SERVER` (429/≥500),
 |---|---|
 | `lib/` | Shared UMD modules (browser global + CommonJS): `word.js` validation, `cache.js` LRU cache, `lookup.js` prompt/request/parse |
 | `tests/` | `node:test` unit tests, one file per lib module |
-| `e2e/` | Manual e2e harness: `serve.js` static server, `test-page.html` fixture, `e2e-happy.png` recorded evidence |
+| `e2e/` | Manual e2e harness: `serve.js` static server, `test-page.html` fixture, `e2e-hover.png` recorded evidence |
 | `docs/superpowers/` | Chinese design spec (`specs/`) and implementation plan (`plans/`) — authoritative on conventions and decisions |
 
 Root: `content.js`, `background.js`, `popup.js`, `popup.html`, `manifest.json`.
@@ -59,7 +59,7 @@ No `package.json`, no build step, no lint config. Everything is plain scripts:
 ## Important Files
 
 - `manifest.json` — MV3; `permissions: ["storage"]`, `host_permissions: https://api.deepseek.com/*`, classic (non-module) `service_worker: background.js`
-- `content.js` — content script: word/context extraction, Shadow-DOM popup, messaging
+- `content.js` — content script: hover trigger (500ms dwell), word/context extraction, Shadow-DOM popup with auto-close, messaging
 - `background.js` — service worker: validation, cache, DeepSeek request, persistence
 - `lib/lookup.js` — prompt building, `fnv1a` context hash, `parseLookupResponse`, `createLookup` DI factory
 - `lib/cache.js` — `LRUCache` (Map-backed; `get` refreshes recency, `entries()` used for persistence)
@@ -81,5 +81,5 @@ No `package.json`, no build step, no lint config. Everything is plain scripts:
 - **Location/naming:** `tests/<module>.test.js`, one per lib module; fixtures are module-level consts
 - **Mocking:** dependency injection via a `baseDeps(over)` factory in `tests/lookup.test.js`; spies are closure flags (`let called = false`); no `chrome.*` stubs exist — that's why lib/ must stay chrome-free
 - **Coverage:** none configured
-- **E2E:** manual — `node e2e/serve.js`, load the extension unpacked, double-click English words (`serendipity`, `ubiquitous`, `meticulous`) → popup appears; double-click Chinese text → must NOT trigger; record evidence as `e2e/e2e-happy.png`
+- **E2E:** manual — `node e2e/serve.js`, load the extension unpacked, hover English words (`serendipity`, `ubiquitous`, `meticulous`) for 500ms → popup appears; moving the pointer away closes it; hovering Chinese text → must NOT trigger; record evidence as `e2e/e2e-hover.png`
 - **Pre-commit checks (from the plan):** unit tests, `node --check`, manifest JSON parse, `git grep -n -i "sk-"` for leaked API keys
