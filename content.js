@@ -276,27 +276,16 @@
         ctxEl.append(labelEl, meaningEl);
         card.appendChild(ctxEl);
       }
-      if (result.data.memoryTip) {
-        const memEl = document.createElement("div");
-        memEl.className = "context";
+      if (result.data.morphology) {
+        const morEl = document.createElement("div");
+        morEl.className = "context";
         const labelEl = document.createElement("span");
         labelEl.className = "context-label";
-        labelEl.textContent = "记忆";
-        const tipEl = document.createElement("span");
-        tipEl.textContent = result.data.memoryTip;
-        memEl.append(labelEl, tipEl);
-        card.appendChild(memEl);
-      }
-      if (result.data.plainEnglish) {
-        const enEl = document.createElement("div");
-        enEl.className = "context";
-        const labelEl = document.createElement("span");
-        labelEl.className = "context-label";
-        labelEl.textContent = "英文释义";
+        labelEl.textContent = "词根词缀";
         const textEl = document.createElement("span");
-        textEl.textContent = result.data.plainEnglish;
-        enEl.append(labelEl, textEl);
-        card.appendChild(enEl);
+        textEl.textContent = result.data.morphology;
+        morEl.append(labelEl, textEl);
+        card.appendChild(morEl);
       }
     } else {
       const errEl = document.createElement("div");
