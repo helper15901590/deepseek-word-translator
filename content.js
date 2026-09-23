@@ -8,6 +8,7 @@
   const CONTEXT_WINDOW = 180;
   const HOVER_DELAY_MS = 500;
   const ACTIVE_MARGIN_PX = 8;
+  const IS_TOP_FRAME = window.top === window;
   const TRANSLATION_STATUS_ID = "dswt-translation-status-host";
   const MAX_TRANSLATION_TEXT_CHARS = 5000;
   const LATIN_RE = /[A-Za-z]/;
@@ -88,6 +89,18 @@
     if (host && !e.composedPath().includes(host)) hidePopup();
   }
 
+  // 指针移入 iframe 后本文档不再收到 mousemove，活跃区域判断不会再触发，
+  // 弹窗会滞留在屏幕上；故在指针进入框架元素时直接关闭。
+  function onMouseOver(e) {
+    const path = e.composedPath ? e.composedPath() : [e.target];
+    for (const node of path) {
+      if (node && node.tagName === "IFRAME") {
+        hidePopup();
+        return;
+      }
+    }
+  }
+
   function isPointInRect(x, y, rect, margin) {
     return (
       x >= rect.left - margin &&
@@ -137,39 +150,32 @@
     );
   }
 
-  // 在指针 (x, y) 处取词；返回 { word, range } 或 null
+  // 在指针 (x, y) 处取词；返回 { word, range } 或 null。开放影子根内的文字同样可取值。
   function extractWord(x, y) {
-    if (document.caretRangeFromPoint) {
-      const caret = document.caretRangeFromPoint(x, y);
-      if (caret && caret.startContainer.nodeType === Node.TEXT_NODE) {
-        const text = caret.startContainer.data;
-        let start = caret.startOffset;
-        let end = caret.endOffset;
-        while (start > 0 && WORD_CHAR_RE.test(text[start - 1])) start--;
-        while (end < text.length && WORD_CHAR_RE.test(text[end])) end++;
-        const w = text.slice(start, end).trim();
-        if (WordUtils.isValidWord(w)) {
-          const range = document.createRange();
-          range.setStart(caret.startContainer, start);
-          range.setEnd(caret.startContainer, end);
-          return { word: WordUtils.normalizeWord(w), range: range };
-        }
-      }
-    }
-    return null;
+    const caret = DomUtils.caretAtPoint(document, x, y);
+    if (!caret) return null;
+    const text = caret.node.data;
+    let start = caret.offset;
+    let end = caret.offset;
+    while (start > 0 && WORD_CHAR_RE.test(text[start - 1])) start--;
+    while (end < text.length && WORD_CHAR_RE.test(text[end])) end++;
+    const w = text.slice(start, end).trim();
+    if (!WordUtils.isValidWord(w)) return null;
+    const range = document.createRange();
+    range.setStart(caret.node, start);
+    range.setEnd(caret.node, end);
+    return { word: WordUtils.normalizeWord(w), range: range };
   }
 
   // 提取单词所在文本块、前后各约 CONTEXT_WINDOW 字符的语境；失败返回 null
   function extractContext(range) {
     try {
-      let el =
-        range.startContainer.nodeType === Node.TEXT_NODE
-          ? range.startContainer.parentElement
-          : range.startContainer;
-      while (el && el !== document.body && !BLOCK_TAGS.has(el.tagName)) {
-        el = el.parentElement;
-      }
-      const block = el || document.body;
+      const block = DomUtils.findContextBlock(
+        range.startContainer,
+        BLOCK_TAGS,
+        document.body
+      );
+      if (!block) return null;
       const fullText = block.textContent.replace(/\s+/g, " ").trim();
       if (fullText.length === 0) return null;
       const pre = document.createRange();
@@ -382,7 +388,7 @@
 
   function shouldSkipTranslationElement(el) {
     if (!el || el === document.documentElement) return true;
-    if (el.closest(SKIP_TRANSLATE_SELECTOR)) return true;
+    if (DomUtils.closestAcrossBoundaries(el, SKIP_TRANSLATE_SELECTOR)) return true;
     const style = getComputedStyle(el);
     if (
       style.display === "none" ||
@@ -397,10 +403,14 @@
   function collectTranslationItems() {
     if (!document.body) return [];
     const items = [];
-    const walker = document.createTreeWalker(
-      document.body,
-      NodeFilter.SHOW_TEXT,
-      {
+    const roots = [document.body];
+    // 逐层进入开放影子根：TreeWalker 只在单棵树内遍历，不会进入影子树
+    for (let i = 0; i < roots.length; i++) {
+      const root = roots[i];
+      for (const shadowRoot of DomUtils.collectOpenShadowRoots(root)) {
+        roots.push(shadowRoot);
+      }
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
         acceptNode(node) {
           const raw = node.nodeValue;
           if (!raw || !LATIN_RE.test(raw) || CJK_RE.test(raw)) {
@@ -415,30 +425,30 @@
           }
           return NodeFilter.FILTER_ACCEPT;
         },
-      }
-    );
-    let node;
-    while ((node = walker.nextNode())) {
-      const raw = node.nodeValue;
-      const text = raw.trim();
-      const start = raw.indexOf(text);
-      const range = document.createRange();
-      range.selectNodeContents(node);
-      let context = extractContext(range);
-      if (context && context !== text) {
-        const at = context.indexOf(text);
-        const contextStart = at > 0 ? Math.max(0, at - 150) : 0;
-        context = context.slice(contextStart, contextStart + 400);
-      } else {
-        context = null;
-      }
-      items.push({
-        node: node,
-        text: text,
-        context: context,
-        leading: raw.slice(0, start),
-        trailing: raw.slice(start + text.length),
       });
+      let node;
+      while ((node = walker.nextNode())) {
+        const raw = node.nodeValue;
+        const text = raw.trim();
+        const start = raw.indexOf(text);
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        let context = extractContext(range);
+        if (context && context !== text) {
+          const at = context.indexOf(text);
+          const contextStart = at > 0 ? Math.max(0, at - 150) : 0;
+          context = context.slice(contextStart, contextStart + 400);
+        } else {
+          context = null;
+        }
+        items.push({
+          node: node,
+          text: text,
+          context: context,
+          leading: raw.slice(0, start),
+          trailing: raw.slice(start + text.length),
+        });
+      }
     }
     return items;
   }
@@ -454,16 +464,25 @@
     return "网页翻译失败，请稍后重试";
   }
 
+  // 本文档内的框架数，用于向 popup 说明页面还有内嵌框架在翻译（嵌套框架会被低估）
+  function countChildFrames() {
+    return document.querySelectorAll("iframe, frame").length;
+  }
+
   async function translatePage() {
     if (translatingPage) {
       showTranslationStatus(TRANSLATION_ERRORS.BUSY, true, 3000);
       return { ok: false, error: "BUSY" };
     }
 
+    const frames = countChildFrames();
     const items = collectTranslationItems();
     if (items.length === 0) {
-      showTranslationStatus(TRANSLATION_ERRORS.NO_CONTENT, true, 4000);
-      return { ok: false, error: "NO_CONTENT" };
+      // 子框架无内容时静默：嵌入的广告等框架大多没有可翻译文本
+      if (IS_TOP_FRAME) {
+        showTranslationStatus(TRANSLATION_ERRORS.NO_CONTENT, true, 4000);
+      }
+      return { ok: false, error: "NO_CONTENT", frames: frames };
     }
 
     translatingPage = true;
@@ -505,6 +524,7 @@
             error: code,
             translated: translatedCount,
             total: items.length,
+            frames: frames,
           };
         }
         for (let i = 0; i < batch.length; i++) {
@@ -528,7 +548,11 @@
       );
       return {
         ok: true,
-        data: { translated: translatedCount, total: items.length },
+        data: {
+          translated: translatedCount,
+          total: items.length,
+          frames: frames,
+        },
       };
     } finally {
       translatingPage = false;
@@ -537,10 +561,18 @@
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!message || message.type !== "translatePage") return;
+    // tabs.sendMessage 会广播到页面内所有框架，各框架只翻译自己；
+    // 但只有顶层框架回复 popup——多框架同时响应时首个响应者不确定，
+    // 某个无内容的子框架先回复会让 popup 显示错误的状态。
+    if (!IS_TOP_FRAME) {
+      translatePage().catch(() => {});
+      return;
+    }
     translatePage()
       .then(sendResponse)
       .catch(() => sendResponse({ ok: false, error: "NETWORK" }));
     return true; // 异步 sendResponse
   });
   document.addEventListener("mousemove", onMouseMove, true);
+  document.addEventListener("mouseover", onMouseOver, true);
 })();

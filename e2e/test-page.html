@@ -5,6 +5,9 @@
 <title>DeepSeek 单词翻译 - E2E 测试页</title>
 <style>
   body { font: 16px/1.8 Georgia, "Microsoft YaHei", serif; max-width: 640px; margin: 40px auto; padding: 0 20px; }
+  h2 { font-size: 16px; margin: 28px 0 8px; color: #57606a; }
+  iframe { width: 100%; height: 130px; border: 1px solid #d0d7de; }
+  .shadow-host { padding: 8px; border: 1px dashed #d0d7de; }
 </style>
 </head>
 <body>
@@ -17,5 +20,39 @@
 <p>
   这是一段中文文本，双击这里的词语不应弹出释义，因为插件仅处理英文单词。
 </p>
+
+<h2>不应被翻译</h2>
+<pre><code>const serendipity = "a fortunate discovery";</code></pre>
+<input type="text" value="ubiquitous value text stays unchanged" size="40">
+
+<h2>内嵌框架</h2>
+<!-- 两个 iframe 都指向 embed.html：相对路径与页面同源，
+     127.0.0.1 与 localhost 在浏览器里互跨源，故其中一个必然是跨源框架 -->
+<iframe src="embed.html" title="same-origin frame"></iframe>
+<iframe src="http://127.0.0.1:8123/embed.html" title="cross-origin frame"></iframe>
+
+<h2>影子根</h2>
+<div id="open-shadow" class="shadow-host"></div>
+<div id="closed-shadow" class="shadow-host"></div>
+<script>
+  function buildShadowHost(id, mode, text) {
+    const root = document.getElementById(id).attachShadow({ mode: mode });
+    const p = document.createElement("p");
+    p.textContent = text;
+    root.appendChild(p);
+  }
+  // 开放影子根：应可悬停取词，也应被整页翻译覆盖
+  buildShadowHost(
+    "open-shadow",
+    "open",
+    "The word ephemeral appears inside an open shadow root."
+  );
+  // 关闭影子根：规范上不可达，作为「不支持」的负向对照
+  buildShadowHost(
+    "closed-shadow",
+    "closed",
+    "The word ubiquitous appears inside a closed shadow root."
+  );
+</script>
 </body>
 </html>

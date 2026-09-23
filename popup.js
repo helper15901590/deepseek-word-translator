@@ -28,6 +28,15 @@ function translationErrorText(result) {
   return base;
 }
 
+// 只有顶层框架回复，故计数口径是顶层文档；内嵌框架各自翻译并显示自己的进度
+function translationSuccessText(result) {
+  const base = "翻译完成，共 " + result.data.translated + " 段";
+  if (result.data.frames > 0) {
+    return base + "；页面内嵌框架的进度见各框架右下角";
+  }
+  return base;
+}
+
 chrome.storage.local.get("apiKey").then((items) => {
   if (typeof items.apiKey === "string") keyInput.value = items.apiKey;
 });
@@ -65,10 +74,18 @@ translateButton.addEventListener("click", async () => {
       type: "translatePage",
     });
     if (!result || !result.ok) {
+      // 顶层文档没有英文，但页面内嵌框架可能有：此时不是失败
+      if (result && result.error === "NO_CONTENT" && result.frames > 0) {
+        showStatus(
+          "主文档没有可翻译的英文内容；内嵌框架的进度见各框架右下角",
+          false
+        );
+        return;
+      }
       showStatus(translationErrorText(result), true);
       return;
     }
-    showStatus("翻译完成，共 " + result.data.translated + " 段", false);
+    showStatus(translationSuccessText(result), false);
   } catch (e) {
     showStatus("当前页面无法翻译；请确认不是 Chrome 内置页面，并刷新后重试", true);
   } finally {
