@@ -8,6 +8,16 @@
   const CONTEXT_WINDOW = 180;
   const HOVER_DELAY_MS = 500;
   const ACTIVE_MARGIN_PX = 8;
+  const TRANSLATION_STATUS_ID = "dswt-translation-status-host";
+  const MAX_TRANSLATION_TEXT_CHARS = 5000;
+  const LATIN_RE = /[A-Za-z]/;
+  const CJK_RE = /[\u3400-\u9fff\uf900-\ufaff]/;
+  const SKIP_TRANSLATE_SELECTOR = [
+    "script", "style", "noscript", "template", "code", "pre", "kbd", "samp",
+    "var", "textarea", "input", "select", "option", "svg", "canvas", "math",
+    "[contenteditable]:not([contenteditable='false'])", "[aria-hidden='true']",
+    "[hidden]",
+  ].join(",");
   const BLOCK_TAGS = new Set([
     "P", "LI", "TD", "TH", "H1", "H2", "H3", "H4", "H5", "H6",
     "BLOCKQUOTE", "PRE", "DIV", "ARTICLE", "SECTION", "DD", "DT", "FIGCAPTION",
@@ -18,6 +28,17 @@
     SERVER: "DeepSeek 服务暂时不可用，请稍后再试",
     NETWORK: "网络请求失败，请检查网络连接",
     PARSE: "释义解析失败，请重试",
+  };
+  const TRANSLATION_ERRORS = {
+    NO_KEY: "请先点击插件图标配置 DeepSeek API Key",
+    AUTH: "API Key 无效或已过期，请在插件面板中更新",
+    SERVER: "DeepSeek 服务暂时不可用，网页翻译已中断",
+    NETWORK: "网络请求失败，网页翻译已中断",
+    PARSE: "翻译结果解析失败，网页翻译已中断",
+    HTTP: "网页翻译请求失败",
+    INVALID: "当前网页没有可翻译的内容",
+    NO_CONTENT: "没有找到需要翻译的英文内容",
+    BUSY: "网页正在翻译中，请稍候",
   };
   const STYLE_TEXT =
     ".card{font:13px/1.5 -apple-system,'Segoe UI','Microsoft YaHei',sans-serif;" +
@@ -41,6 +62,9 @@
   let hoverTimer = null;
   let pointerPos = { x: -1, y: -1 };
   let activeWord = null;
+  let translatingPage = false;
+  let translationStatusHost = null;
+  let translationStatusTimer = null;
 
   function hidePopup() {
     if (!host) return;
@@ -312,5 +336,211 @@
     armHoverTimer();
   }
 
+  function removeTranslationStatus() {
+    clearTimeout(translationStatusTimer);
+    translationStatusTimer = null;
+    if (translationStatusHost) {
+      translationStatusHost.remove();
+      translationStatusHost = null;
+    }
+  }
+
+  function showTranslationStatus(message, isError, autoHideMs) {
+    clearTimeout(translationStatusTimer);
+    if (!translationStatusHost || !translationStatusHost.isConnected) {
+      translationStatusHost = document.createElement("div");
+      translationStatusHost.id = TRANSLATION_STATUS_ID;
+      translationStatusHost.style.cssText =
+        "position:fixed;right:16px;bottom:16px;z-index:2147483647;" +
+        "margin:0;padding:0;border:0;background:transparent;pointer-events:none;";
+      const shadow = translationStatusHost.attachShadow({ mode: "open" });
+      const style = document.createElement("style");
+      style.textContent =
+        ":host{all:initial}.status{font:13px/1.5 -apple-system,'Segoe UI'," +
+        "'Microsoft YaHei',sans-serif;background:#1e1f24;color:#e8e8ea;" +
+        "border:1px solid rgba(255,255,255,.12);border-radius:8px;" +
+        "padding:8px 12px;box-shadow:0 4px 16px rgba(0,0,0,.3);" +
+        "max-width:320px}.status.error{color:#ffb3ab}" +
+        "@media(prefers-color-scheme:light){.status{background:#fff;" +
+        "color:#1f2328;border-color:rgba(0,0,0,.1);" +
+        "box-shadow:0 4px 16px rgba(0,0,0,.18)}.status.error{color:#d1242f}}";
+      const status = document.createElement("div");
+      status.className = "status";
+      shadow.append(style, status);
+      document.documentElement.appendChild(translationStatusHost);
+    }
+    const status = translationStatusHost.shadowRoot.querySelector(".status");
+    status.textContent = message;
+    status.classList.toggle("error", !!isError);
+    if (autoHideMs) {
+      translationStatusTimer = setTimeout(() => {
+        translationStatusTimer = null;
+        removeTranslationStatus();
+      }, autoHideMs);
+    }
+  }
+
+  function shouldSkipTranslationElement(el) {
+    if (!el || el === document.documentElement) return true;
+    if (el.closest(SKIP_TRANSLATE_SELECTOR)) return true;
+    const style = getComputedStyle(el);
+    if (
+      style.display === "none" ||
+      style.visibility === "hidden" ||
+      style.opacity === "0"
+    ) {
+      return true;
+    }
+    return el !== document.body && el.getClientRects().length === 0;
+  }
+
+  function collectTranslationItems() {
+    if (!document.body) return [];
+    const items = [];
+    const walker = document.createTreeWalker(
+      document.body,
+      NodeFilter.SHOW_TEXT,
+      {
+        acceptNode(node) {
+          const raw = node.nodeValue;
+          if (!raw || !LATIN_RE.test(raw) || CJK_RE.test(raw)) {
+            return NodeFilter.FILTER_REJECT;
+          }
+          const text = raw.trim();
+          if (text.length < 2 || text.length > MAX_TRANSLATION_TEXT_CHARS) {
+            return NodeFilter.FILTER_REJECT;
+          }
+          if (shouldSkipTranslationElement(node.parentElement)) {
+            return NodeFilter.FILTER_REJECT;
+          }
+          return NodeFilter.FILTER_ACCEPT;
+        },
+      }
+    );
+    let node;
+    while ((node = walker.nextNode())) {
+      const raw = node.nodeValue;
+      const text = raw.trim();
+      const start = raw.indexOf(text);
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      let context = extractContext(range);
+      if (context && context !== text) {
+        const at = context.indexOf(text);
+        const contextStart = at > 0 ? Math.max(0, at - 150) : 0;
+        context = context.slice(contextStart, contextStart + 400);
+      } else {
+        context = null;
+      }
+      items.push({
+        node: node,
+        text: text,
+        context: context,
+        leading: raw.slice(0, start),
+        trailing: raw.slice(start + text.length),
+      });
+    }
+    return items;
+  }
+
+  function applyTranslation(item, translation) {
+    if (!item.node.isConnected) return;
+    item.node.nodeValue = item.leading + translation + item.trailing;
+  }
+
+  function translationErrorMessage(code, status) {
+    if (TRANSLATION_ERRORS[code]) return TRANSLATION_ERRORS[code];
+    if (code === "HTTP") return "网页翻译请求失败（HTTP " + status + "）";
+    return "网页翻译失败，请稍后重试";
+  }
+
+  async function translatePage() {
+    if (translatingPage) {
+      showTranslationStatus(TRANSLATION_ERRORS.BUSY, true, 3000);
+      return { ok: false, error: "BUSY" };
+    }
+
+    const items = collectTranslationItems();
+    if (items.length === 0) {
+      showTranslationStatus(TRANSLATION_ERRORS.NO_CONTENT, true, 4000);
+      return { ok: false, error: "NO_CONTENT" };
+    }
+
+    translatingPage = true;
+    let translatedCount = 0;
+    showTranslationStatus("正在翻译网页…", false, 0);
+    try {
+      const batches = PageTranslate.chunkTexts(
+        items.map((item) => item.text)
+      );
+      for (const batch of batches) {
+        let result;
+        const batchItems = items.slice(
+          translatedCount,
+          translatedCount + batch.length
+        );
+        try {
+          result = await chrome.runtime.sendMessage({
+            type: "translateBatch",
+            texts: batch,
+            contexts: batchItems.map((item) => item.context || ""),
+          });
+        } catch (e) {
+          result = { ok: false, error: "NETWORK" };
+        }
+        if (
+          !result ||
+          !result.ok ||
+          !Array.isArray(result.data) ||
+          result.data.length !== batch.length
+        ) {
+          const code = result && result.error ? result.error : "PARSE";
+          showTranslationStatus(
+            translationErrorMessage(code, result && result.status),
+            true,
+            5000
+          );
+          return {
+            ok: false,
+            error: code,
+            translated: translatedCount,
+            total: items.length,
+          };
+        }
+        for (let i = 0; i < batch.length; i++) {
+          applyTranslation(items[translatedCount + i], result.data[i]);
+        }
+        translatedCount += batch.length;
+        showTranslationStatus(
+          "正在翻译网页 " +
+            translatedCount +
+            "/" +
+            items.length +
+            " 段…",
+          false,
+          0
+        );
+      }
+      showTranslationStatus(
+        "网页翻译完成，共 " + translatedCount + " 段",
+        false,
+        3500
+      );
+      return {
+        ok: true,
+        data: { translated: translatedCount, total: items.length },
+      };
+    } finally {
+      translatingPage = false;
+    }
+  }
+
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (!message || message.type !== "translatePage") return;
+    translatePage()
+      .then(sendResponse)
+      .catch(() => sendResponse({ ok: false, error: "NETWORK" }));
+    return true; // 异步 sendResponse
+  });
   document.addEventListener("mousemove", onMouseMove, true);
 })();

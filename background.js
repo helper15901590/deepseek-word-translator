@@ -1,11 +1,18 @@
-// Service Worker：取词查询代理 + 缓存 + DeepSeek 调用
-importScripts("lib/word.js", "lib/cache.js", "lib/lookup.js");
+// Service Worker：取词 / 整页翻译查询代理 + 缓存 + DeepSeek 调用
+importScripts(
+  "lib/word.js",
+  "lib/cache.js",
+  "lib/lookup.js",
+  "lib/translate.js"
+);
 
 const API_URL = "https://api.deepseek.com/chat/completions";
 const CACHE_STORAGE_KEY = "lookupCache_v1";
 const API_KEY_STORAGE_KEY = "apiKey";
 const CACHE_CAPACITY = 500;
 const TIMEOUT_MS = 15000;
+const MAX_TRANSLATION_TEXTS = 32;
+const MAX_TRANSLATION_CHARS = 5000;
 
 const cache = new Cache.LRUCache(CACHE_CAPACITY);
 
@@ -33,10 +40,19 @@ async function getApiKey() {
   return typeof key === "string" ? key.trim() : "";
 }
 
-async function requestJson(messages) {
+async function requestJson(messages, options) {
+  const opts = options || {};
+  const requestedMaxTokens = Number.isInteger(opts.maxTokens)
+    ? opts.maxTokens
+    : 200;
+  const maxTokens = Math.max(1, Math.min(8192, requestedMaxTokens));
+  const requestedTimeout = Number.isInteger(opts.timeoutMs)
+    ? opts.timeoutMs
+    : TIMEOUT_MS;
+  const timeoutMs = Math.max(1000, Math.min(60000, requestedTimeout));
   const apiKey = await getApiKey();
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(API_URL, {
       method: "POST",
@@ -48,7 +64,7 @@ async function requestJson(messages) {
         model: "deepseek-chat",
         messages: messages,
         temperature: 0.3,
-        max_tokens: 200,
+        max_tokens: maxTokens,
         stream: false,
       }),
       signal: controller.signal,
@@ -78,19 +94,60 @@ const lookup = Lookup.createLookup({
   },
 });
 
+const translateBatch = PageTranslate.createBatchTranslator({
+  getApiKey: getApiKey,
+  requestJson: requestJson,
+});
+
+function isValidTranslationBatch(texts, contexts) {
+  if (!Array.isArray(texts) || texts.length === 0) return false;
+  if (texts.length > MAX_TRANSLATION_TEXTS) return false;
+  if (
+    contexts !== undefined &&
+    (!Array.isArray(contexts) ||
+      contexts.length !== texts.length ||
+      contexts.some(
+        (context) => typeof context !== "string" || context.length > 400
+      ))
+  ) {
+    return false;
+  }
+  let totalChars = 0;
+  for (const text of texts) {
+    if (typeof text !== "string" || text.trim() === "") return false;
+    if (text.length > MAX_TRANSLATION_CHARS) return false;
+    totalChars += text.length;
+  }
+  return totalChars <= MAX_TRANSLATION_CHARS;
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (!message || message.type !== "lookup") return;
-  (async () => {
-    if (!WordUtils.isValidWord(message.word)) {
-      sendResponse({ ok: false, error: "INVALID" });
-      return;
-    }
-    const word = WordUtils.normalizeWord(message.word);
-    let context = null;
-    if (typeof message.context === "string" && message.context.trim() !== "") {
-      context = message.context.trim().slice(0, 400);
-    }
-    sendResponse(await lookup(word, context));
-  })();
-  return true; // 异步 sendResponse
+  if (!message || typeof message.type !== "string") return;
+
+  if (message.type === "lookup") {
+    (async () => {
+      if (!WordUtils.isValidWord(message.word)) {
+        sendResponse({ ok: false, error: "INVALID" });
+        return;
+      }
+      const word = WordUtils.normalizeWord(message.word);
+      let context = null;
+      if (typeof message.context === "string" && message.context.trim() !== "") {
+        context = message.context.trim().slice(0, 400);
+      }
+      sendResponse(await lookup(word, context));
+    })();
+    return true; // 异步 sendResponse
+  }
+
+  if (message.type === "translateBatch") {
+    (async () => {
+      if (!isValidTranslationBatch(message.texts, message.contexts)) {
+        sendResponse({ ok: false, error: "INVALID" });
+        return;
+      }
+      sendResponse(await translateBatch(message.texts, message.contexts));
+    })();
+    return true; // 异步 sendResponse
+  }
 });
